@@ -5,11 +5,9 @@
 # Build / runtime artifacts
 node_modules/
 function.zip
-card.svg
 preview.svg
 preview.png
 preview-error.svg
-.difficulty-cache.json
 
 # Test fixtures contain your real solved-problem data; keep them local.
 test-fixture-*.json
