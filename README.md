@@ -1,9 +1,11 @@
 # NeetCode Stats Card
 
+![Card preview](card.svg)
+
 A self-updating stats card for a GitHub profile README that shows your NeetCode
 progress: total problems solved, an Easy/Medium/Hard breakdown, and your streak.
-The SVG is served from S3 and refreshed daily by an AWS Lambda function triggered
-by EventBridge.
+A GitHub Actions workflow runs daily, regenerates the SVG, and commits it to the
+repo. Your README just points to that file.
 
 This document is both the setup guide **and** the story of how it was built —
 what we discovered, what broke, and why each decision was made. If you only want
@@ -125,19 +127,20 @@ access token on every run.**
 ## Architecture
 
 ```
-   GitHub README <img> ──▶  S3 (neetcode-card.svg, public)
-                                        ▲
-                                        │ writes fresh SVG daily
-                              ┌─────────┴────────┐
-   EventBridge (rate 1 day) ──▶  Lambda function  │
-                              └─────────┬────────┘
-                                        │ pipeline:
-                                        │  1. refresh token (Google securetoken)
-                                        │  2. getCompletedProblems (NeetCode, Bearer)
-                                        │  3. getUserStreakData   (NeetCode, Bearer)
-                                        │  4. difficulty per slug (LeetCode GraphQL)
-                                        │  5. build SVG
-                                        └─▶ save SVG + caches to S3
+   GitHub profile README
+     └──▶ card.svg (in this repo)
+                  ▲
+                  │ commits fresh SVG daily
+     ┌────────────┴──────────────┐
+     │  GitHub Actions workflow   │
+     │  (cron: midnight UTC)      │
+     └────────────┬──────────────┘
+                  │ pipeline:
+                  │  1. refresh token (Google securetoken)
+                  │  2. getCompletedProblems (NeetCode, Bearer)
+                  │  3. getUserStreakData   (NeetCode, Bearer)
+                  │  4. difficulty per slug (LeetCode GraphQL)
+                  │  5. build SVG → commit card.svg
 ```
 
 Every external call in that pipeline was individually tested with a real response
@@ -149,18 +152,21 @@ before any deployment code was written.
 
 ```
 neetcode-stats-card/
+├── .github/
+│   └── workflows/
+│       └── refresh.yml  # daily GitHub Actions workflow
 ├── src/
-│   ├── auth.js        # refresh token -> fresh access token (Google securetoken)
-│   ├── neetcode.js    # callableFunctionHttp client + response parsing
-│   ├── leetcode.js    # per-slug difficulty via LeetCode GraphQL (+ caching, rate-limit)
-│   ├── card.js        # SVG generation (main card + error fallback)
-│   └── pipeline.js    # chains all of the above into one stats object
-├── local.js           # Phase 1: run the whole thing locally, writes card.svg
-├── lambda.js          # Phases 3-4: Lambda handler with 24h S3 cache
-├── test.js            # offline integration test (mocks network, real pipeline)
-├── deploy.sh          # zip + push to Lambda
+│   ├── auth.js          # refresh token -> fresh access token (Google securetoken)
+│   ├── neetcode.js      # callableFunctionHttp client + response parsing
+│   ├── leetcode.js      # per-slug difficulty via LeetCode GraphQL (+ caching, rate-limit)
+│   ├── card.js          # SVG generation (main card + error fallback)
+│   └── pipeline.js      # chains all of the above into one stats object
+├── local.js             # run the pipeline locally, writes card.svg
+├── test.js              # offline integration test (mocks network, real pipeline)
+├── card.svg             # auto-committed by the workflow — don't edit by hand
+├── .difficulty-cache.json
 ├── package.json
-└── README.md          # this file
+└── README.md
 ```
 
 ---
@@ -170,7 +176,7 @@ neetcode-stats-card/
 ### Prerequisites
 
 - Node.js 18+
-- An AWS account (Lambda + S3 are effectively free at this scale)
+- A GitHub account (Actions is free on public repos)
 - Your NeetCode Firebase **refresh token** (see below)
 
 ### Getting your refresh token
@@ -215,72 +221,59 @@ captured data with the network mocked:
 npm test
 ```
 
-### Phase 3 — deploy to Lambda
+### Phase 3 — deploy with GitHub Actions
 
-1. **Create an S3 bucket** for the cache (any name).
+1. **Fork or push this repo to your GitHub account.**
 
-2. **Make the SVG object publicly readable** — disable Block Public Access on the
-   bucket, then add a bucket policy allowing `s3:GetObject` on `<bucket>/neetcode-card.svg`.
+2. **Add your refresh token as a secret:**
+   - Go to your repo → **Settings** → **Secrets and variables** → **Actions**
+   - Click **New repository secret**
+   - Name: `NEETCODE_REFRESH_TOKEN`, value: your token
 
-3. **Create the Lambda function** (Console → Lambda → Create function):
-   - Runtime: Node.js 20.x
-   - Set environment variables:
-     - `NEETCODE_REFRESH_TOKEN` = your token
-     - `NEETCODE_USERNAME` = your display name
-     - `CACHE_BUCKET` = your bucket name
-   - Set timeout to **5 minutes** (Configuration → General → Timeout) — the first
-     uncached run makes ~130 sequential LeetCode calls.
-   - Give the execution role `s3:GetObject` and `s3:PutObject` on the bucket.
-
-4. **Add an EventBridge schedule** (EventBridge → Rules → Create):
-   - Schedule: `rate(1 day)`
-   - Target: your Lambda function
-
-5. **Deploy the code:**
-   ```bash
-   ./deploy.sh <your-lambda-function-name>
+3. **Edit the username** in `.github/workflows/refresh.yml`:
+   ```yaml
+   NEETCODE_USERNAME: your name here
    ```
 
-6. Invoke once manually to prime the cache:
-   ```bash
-   aws lambda invoke --function-name <your-lambda-function-name> \
-     --payload '{}' --cli-binary-format raw-in-base64-out /dev/null
-   ```
+4. **Run the workflow once manually** to generate the initial `card.svg`:
+   - Go to **Actions** tab → **Refresh NeetCode Stats Card** → **Run workflow**
+
+5. After it completes, `card.svg` will be committed to your repo.
 
 ### Phase 5 — embed in your README
 
 ```markdown
-![NeetCode Stats](https://<your-bucket>.s3.<region>.amazonaws.com/neetcode-card.svg)
+![NeetCode Stats](https://raw.githubusercontent.com/<your-username>/<your-repo>/master/card.svg)
 ```
 
 Push it to your profile repo and confirm it renders.
 
 ---
 
-## How the 24-hour refresh behaves
+## How the daily refresh works
 
-EventBridge fires the Lambda once per day. The Lambda runs the full pipeline,
-writes a fresh SVG to S3, and exits. GitHub's image proxy fetches the SVG
-directly from S3 on every profile view — no Lambda involved in serving it.
+The workflow in `.github/workflows/refresh.yml` runs every day at midnight UTC.
+It executes `npm run local`, which runs the full pipeline and writes a fresh
+`card.svg`. If the file changed, it commits and pushes it automatically.
 
-To force a refresh outside the schedule, delete the metadata cache file and
-invoke Lambda manually:
+To trigger a refresh manually outside the schedule:
+- Go to **Actions** → **Refresh NeetCode Stats Card** → **Run workflow**
 
-```bash
-aws s3 rm s3://<your-bucket>/neetcode-card.meta.json
-aws lambda invoke --function-name <your-lambda-function-name> \
-  --payload '{}' --cli-binary-format raw-in-base64-out /dev/null
-```
+The `.difficulty-cache.json` file is also committed so repeat runs skip
+re-fetching difficulty for problems already seen, making subsequent runs fast.
 
 ---
 
 ## Failure handling
 
-- If token refresh fails (e.g. the refresh token was revoked), the function first
-  tries to serve the **last-known-good** SVG from S3 (marked `X-Cache: STALE`),
-  so your profile never shows a broken image.
-- If there's no cache at all, it returns a small "stats temporarily unavailable"
-  fallback card instead of an error.
+If the workflow fails (e.g. the refresh token was revoked after logging out of
+NeetCode), the last committed `card.svg` stays in the repo unchanged — your
+profile never shows a broken image, it just goes stale until you fix it.
+
+To fix a broken token:
+1. Log into NeetCode and extract a fresh refresh token (see [Getting your refresh token](#getting-your-refresh-token))
+2. Go to repo → **Settings** → **Secrets and variables** → **Actions** → update `NEETCODE_REFRESH_TOKEN`
+3. Re-run the workflow manually
 
 ---
 
@@ -297,4 +290,86 @@ aws lambda invoke --function-name <your-lambda-function-name> \
   card goes stale until you replace the secret with a fresh token.
 - **LeetCode's GraphQL endpoint is also unofficial.** It's stable and widely used,
   but it isn't a contract.
+
+---
+
+## GitHub Actions explained
+
+If you haven't used GitHub Actions before, here's what's going on.
+
+### What is a workflow?
+
+A workflow is a YAML file in `.github/workflows/` that tells GitHub to run a
+series of steps automatically — either on a schedule, on a git event (like a
+push), or manually.
+
+### The workflow file
+
+```yaml
+on:
+  schedule:
+    - cron: '0 0 * * *'  # runs every day at midnight UTC
+  workflow_dispatch:       # adds a "Run workflow" button in the Actions UI
+```
+
+`cron` uses standard Unix cron syntax: `minute hour day month weekday`.
+`0 0 * * *` means "at 00:00, every day".
+
+```yaml
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+```
+
+Each job runs on a fresh virtual machine. `contents: write` lets the job commit
+and push back to the repo.
+
+```yaml
+    steps:
+      - uses: actions/checkout@v4       # clones your repo into the runner
+      - uses: actions/setup-node@v4     # installs Node.js
+          with:
+            node-version: '20'
+            cache: 'npm'               # caches node_modules between runs
+
+      - run: npm ci                     # installs dependencies
+
+      - name: Run pipeline
+        env:
+          NEETCODE_REFRESH_TOKEN: ${{ secrets.NEETCODE_REFRESH_TOKEN }}
+          NEETCODE_USERNAME: husamemad
+        run: npm run local              # runs local.js, writes card.svg
+```
+
+`${{ secrets.NEETCODE_REFRESH_TOKEN }}` pulls the token from your repo's
+encrypted secrets — it's never visible in logs.
+
+```yaml
+      - name: Commit card if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add card.svg .difficulty-cache.json
+          git diff --staged --quiet || git commit -m "Refresh stats card"
+          git push
+```
+
+`git diff --staged --quiet || git commit` only commits if something actually
+changed — so if your stats didn't change that day, no empty commit is made.
+
+### Secrets
+
+Secrets are encrypted key-value pairs stored per repo. They're injected as
+environment variables at runtime and never appear in logs. Store your refresh
+token here — never in the code.
+
+Manage them at: repo → **Settings** → **Secrets and variables** → **Actions**
+
+### Running manually
+
+Go to **Actions** → **Refresh NeetCode Stats Card** → **Run workflow** (top
+right). This triggers the same job as the daily schedule, useful for forcing a
+refresh or testing after updating your token.
 
