@@ -130,5 +130,6 @@
   "minimum-difference-between-highest-and-lowest-of-k-scores": "Easy",
   "number-of-sub-arrays-of-size-k-and-average-greater-than-or-equal-to-threshold": "Medium",
   "grumpy-bookstore-owner": "Medium",
-  "longest-substring-with-at-most-two-distinct-characters": "Medium"
+  "longest-substring-with-at-most-two-distinct-characters": "Medium",
+  "largest-rectangle-in-histogram": "Hard"
 }

@@ -10,9 +10,9 @@
   
     <circle cx="105" cy="158" r="58" fill="none" stroke="#21262d" stroke-width="9" />
     <circle cx="105" cy="158" r="58" fill="none" stroke="#f79a09" stroke-width="9"
-      stroke-linecap="round" stroke-dasharray="49.43891748383034 364.424747816416"
+      stroke-linecap="round" stroke-dasharray="49.81345473749572 364.424747816416"
       transform="rotate(-90 105 158)" />
-  <text x="105" y="160" fill="#e6edf3" font-size="32" font-weight="700" text-anchor="middle" font-family="monospace">132</text>
+  <text x="105" y="160" fill="#e6edf3" font-size="32" font-weight="700" text-anchor="middle" font-family="monospace">133</text>
   <text x="105" y="182" fill="#8b949e" font-size="12" text-anchor="middle" font-family="monospace">Solved</text>
 
   <!-- Difficulty rows: text baseline at y, bar 8px below -->
@@ -28,12 +28,12 @@
     <rect x="210" y="166" width="25.0" height="7" rx="3.5" fill="#ffb800" />
   
     <text x="210" y="208" fill="#f63737" font-size="14" font-weight="700" font-family="monospace">Hard</text>
-    <text x="510" y="208" fill="#e6edf3" font-size="14" text-anchor="end" font-family="monospace">1 / 149</text>
+    <text x="510" y="208" fill="#e6edf3" font-size="14" text-anchor="end" font-family="monospace">2 / 149</text>
     <rect x="210" y="216" width="300" height="7" rx="3.5" fill="#21262d" />
-    <rect x="210" y="216" width="2.0" height="7" rx="3.5" fill="#f63737" />
+    <rect x="210" y="216" width="4.0" height="7" rx="3.5" fill="#f63737" />
 
   <!-- Streak footer -->
   <line x1="28" y1="244" x2="512" y2="244" stroke="#30363d" stroke-width="1" />
-  <text x="28" y="270" fill="#8b949e" font-size="13" font-family="monospace">Current streak: <tspan fill="#e6edf3" font-weight="700">0</tspan></text>
+  <text x="28" y="270" fill="#8b949e" font-size="13" font-family="monospace">Current streak: <tspan fill="#e6edf3" font-weight="700">1</tspan></text>
   <text x="512" y="270" fill="#8b949e" font-size="13" text-anchor="end" font-family="monospace">Max streak: <tspan fill="#e6edf3" font-weight="700">41</tspan></text>
 </svg>
