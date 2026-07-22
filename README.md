@@ -2,8 +2,8 @@
 
 A self-updating stats card for a GitHub profile README that shows your NeetCode
 progress: total problems solved, an Easy/Medium/Hard breakdown, and your streak.
-It renders as an SVG served from an AWS Lambda function, refreshed at most once
-every 24 hours.
+The SVG is served from S3 and refreshed daily by an AWS Lambda function triggered
+by EventBridge.
 
 This document is both the setup guide **and** the story of how it was built —
 what we discovered, what broke, and why each decision was made. If you only want
@@ -54,22 +54,14 @@ body names which server function to run. The bodies were self-documenting:
 | ----------------------- | ------------------------------------------------------------ |
 | `getCompletedProblems`  | Your solved problems, grouped by topic (as LeetCode URLs)    |
 | `getUserStreakData`     | Streak + daily activity heatmap                              |
-| `getLeaderboardData`    | A solved-count + percentile (note: **cached/laggy**, see below) |
+| `getLeaderboardData`    | A solved-count + percentile (cached/laggy — not used)        |
 | `getTopicCounts`        | Total problems per topic across the platform                 |
 | `getUserInfo`           | Profile info (also contains sensitive account fields)        |
 
 `getProblemListFunctionHttp` is a separate endpoint returning NeetCode's problem
 catalog with difficulty per problem.
 
-### 3. The leaderboard number lies (slightly)
-
-`getLeaderboardData` reported `userSolvedCount: 117`, but `getCompletedProblems`
-contained **132** unique problems. The leaderboard stat is an aggregate that's
-recomputed on a delay, so it lagged behind reality. **Lesson: count
-`getCompletedProblems` yourself; don't trust the pre-aggregated number.** The
-card uses the length of the completed list as the source of truth.
-
-### 4. The difficulty problem (and why LeetCode, not NeetCode, provides it)
+### 3. The difficulty problem (and why LeetCode, not NeetCode, provides it)
 
 The card needs an Easy/Medium/Hard split, but `getCompletedProblems` returns only
 URLs — no difficulty. The obvious fix was to join against NeetCode's own catalog
@@ -101,7 +93,7 @@ POST https://leetcode.com/graphql
 This endpoint needs no authentication. Looping it over all 132 solved slugs
 produced **Easy 81 / Medium 50 / Hard 1**, which matches the site's UI exactly.
 
-### 5. The authentication mechanism (the surprising part)
+### 4. The authentication mechanism (the surprising part)
 
 We assumed NeetCode used a session cookie. It doesn't:
 
@@ -133,22 +125,19 @@ access token on every run.**
 ## Architecture
 
 ```
-                          ┌──────────────────────────────┐
-   GitHub README <img> ──▶│  Lambda Function URL (public) │
-                          └───────────────┬──────────────┘
-                                          │
-                              cache fresh (<24h)?
-                               │yes            │no
-                               ▼               ▼
-                        return cached     run pipeline:
-                        SVG from S3          1. refresh token (Google securetoken)
-                                             2. getCompletedProblems (NeetCode, Bearer)
-                                             3. getUserStreakData   (NeetCode, Bearer)
-                                             4. difficulty per slug (LeetCode GraphQL)
-                                             5. build SVG
-                                             6. save SVG + caches to S3
-                                             ▼
-                                        return fresh SVG
+   GitHub README <img> ──▶  S3 (neetcode-card.svg, public)
+                                        ▲
+                                        │ writes fresh SVG daily
+                              ┌─────────┴────────┐
+   EventBridge (rate 1 day) ──▶  Lambda function  │
+                              └─────────┬────────┘
+                                        │ pipeline:
+                                        │  1. refresh token (Google securetoken)
+                                        │  2. getCompletedProblems (NeetCode, Bearer)
+                                        │  3. getUserStreakData   (NeetCode, Bearer)
+                                        │  4. difficulty per slug (LeetCode GraphQL)
+                                        │  5. build SVG
+                                        └─▶ save SVG + caches to S3
 ```
 
 Every external call in that pipeline was individually tested with a real response
@@ -228,34 +217,40 @@ npm test
 
 ### Phase 3 — deploy to Lambda
 
-1. **Create an S3 bucket** for the cache (any name; keep it private).
+1. **Create an S3 bucket** for the cache (any name).
 
-2. **Create the Lambda function** (Console → Lambda → Create function):
+2. **Make the SVG object publicly readable** — disable Block Public Access on the
+   bucket, then add a bucket policy allowing `s3:GetObject` on `<bucket>/neetcode-card.svg`.
+
+3. **Create the Lambda function** (Console → Lambda → Create function):
    - Runtime: Node.js 20.x
-   - After creating, set environment variables:
+   - Set environment variables:
      - `NEETCODE_REFRESH_TOKEN` = your token
      - `NEETCODE_USERNAME` = your display name
      - `CACHE_BUCKET` = your bucket name
-     - (optional) `CACHE_TTL_SECONDS` = `86400`
-   - Increase the timeout to ~30s (Configuration → General → Timeout), since the
-     first, uncached run makes many sequential LeetCode calls.
-   - Give the function's execution role `s3:GetObject` and `s3:PutObject` on the
-     bucket.
+   - Set timeout to **5 minutes** (Configuration → General → Timeout) — the first
+     uncached run makes ~130 sequential LeetCode calls.
+   - Give the execution role `s3:GetObject` and `s3:PutObject` on the bucket.
 
-3. **Enable a Function URL** (Configuration → Function URL → Create):
-   - Auth type: **NONE** (it must be publicly embeddable).
+4. **Add an EventBridge schedule** (EventBridge → Rules → Create):
+   - Schedule: `rate(1 day)`
+   - Target: your Lambda function
 
-4. **Deploy the code:**
+5. **Deploy the code:**
    ```bash
    ./deploy.sh <your-lambda-function-name>
    ```
 
-5. Open the Function URL in a browser — you should see your card.
+6. Invoke once manually to prime the cache:
+   ```bash
+   aws lambda invoke --function-name <your-lambda-function-name> \
+     --payload '{}' --cli-binary-format raw-in-base64-out /dev/null
+   ```
 
 ### Phase 5 — embed in your README
 
 ```markdown
-![NeetCode Stats](https://<your-id>.lambda-url.<region>.on.aws/)
+![NeetCode Stats](https://<your-bucket>.s3.<region>.amazonaws.com/neetcode-card.svg)
 ```
 
 Push it to your profile repo and confirm it renders.
@@ -264,16 +259,18 @@ Push it to your profile repo and confirm it renders.
 
 ## How the 24-hour refresh behaves
 
-The Lambda is **on-demand with a cache**, not a blind timer:
+EventBridge fires the Lambda once per day. The Lambda runs the full pipeline,
+writes a fresh SVG to S3, and exits. GitHub's image proxy fetches the SVG
+directly from S3 on every profile view — no Lambda involved in serving it.
 
-- GitHub's image proxy hits your URL whenever someone views your profile.
-- If the cached SVG in S3 is under 24h old, it's returned immediately — no token
-  refresh, no API calls.
-- If it's older, the function regenerates once, saves, and returns fresh.
+To force a refresh outside the schedule, delete the metadata cache file and
+invoke Lambda manually:
 
-So the expensive work happens at most once per day, and only if someone actually
-looks. If you'd prefer a guaranteed daily refresh regardless of views, add an
-**EventBridge** schedule (`rate(1 day)`) that invokes the function.
+```bash
+aws s3 rm s3://<your-bucket>/neetcode-card.meta.json
+aws lambda invoke --function-name <your-lambda-function-name> \
+  --payload '{}' --cli-binary-format raw-in-base64-out /dev/null
+```
 
 ---
 
@@ -301,17 +298,3 @@ looks. If you'd prefer a guaranteed daily refresh regardless of views, add an
 - **LeetCode's GraphQL endpoint is also unofficial.** It's stable and widely used,
   but it isn't a contract.
 
----
-
-## Why these choices
-
-- **SVG over PNG:** it's just text, so the card is built by string-templating
-  numbers into XML — no rendering library, tiny output, scales crisply, and
-  GitHub renders it natively.
-- **Lambda over GitHub Actions:** a Function URL gives one stable endpoint that
-  both generates *and* serves the image, with no separate hosting step. (GitHub
-  Actions would work too, writing the SVG to a branch served by Pages.)
-- **On-demand + cache over a pure cron:** avoids doing work nobody will see,
-  while still capping freshness at 24h.
-- **LeetCode for difficulty:** sidesteps NeetCode's incompatible internal slugs
-  by using the real LeetCode URLs we already have.
