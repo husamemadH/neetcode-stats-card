@@ -34,6 +34,6 @@
 
   <!-- Streak footer -->
   <line x1="28" y1="244" x2="512" y2="244" stroke="#30363d" stroke-width="1" />
-  <text x="28" y="270" fill="#8b949e" font-size="13" font-family="monospace">Current streak: <tspan fill="#e6edf3" font-weight="700">1</tspan></text>
+  <text x="28" y="270" fill="#8b949e" font-size="13" font-family="monospace">Current streak: <tspan fill="#e6edf3" font-weight="700">0</tspan></text>
   <text x="512" y="270" fill="#8b949e" font-size="13" text-anchor="end" font-family="monospace">Max streak: <tspan fill="#e6edf3" font-weight="700">41</tspan></text>
 </svg>
